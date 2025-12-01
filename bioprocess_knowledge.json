@@ -1,0 +1,222 @@
+{
+    "ONLINE": {
+        "Time_Hours": [
+            "time",
+            "timer",
+            "timestamp",
+            "duration",
+            "process time"
+        ],
+        "Temperature": [
+            "temp",
+            "t\u00b0",
+            "deg c",
+            "heating"
+        ],
+        "pH": [
+            "ph ",
+            "ph_",
+            "ph-value"
+        ],
+        "DO_Percent": [
+            "do ",
+            "po2",
+            "oxygen",
+            "dissolved",
+            "dot"
+        ],
+        "Pressure": [
+            "press",
+            "bar",
+            "psi",
+            "headspace"
+        ],
+        "Stirring_Speed": [
+            "stir",
+            "agit",
+            "rpm",
+            "speed",
+            "mix"
+        ],
+        "Torque": [
+            "torque",
+            "nm"
+        ],
+        "Power_Input": [
+            "power",
+            "watt",
+            "p/v"
+        ],
+        "Air_Flow": [
+            "air",
+            "flow",
+            "aeration",
+            "sparge"
+        ],
+        "O2_Flow": [
+            "o2 flow",
+            "oxygen flow"
+        ],
+        "N2_Flow": [
+            "n2 flow",
+            "nitrogen"
+        ],
+        "CO2_Flow": [
+            "co2 flow",
+            "carbon dioxide flow"
+        ],
+        "Gas_Overlay": [
+            "overlay",
+            "headspace flow"
+        ],
+        "Offgas_CO2": [
+            "co2",
+            "carbon diox",
+            "offgas co2",
+            "xco2"
+        ],
+        "Offgas_O2": [
+            "o2",
+            "oxygen out",
+            "offgas o2",
+            "xo2"
+        ],
+        "OUR": [
+            "our",
+            "oxygen uptake"
+        ],
+        "CER": [
+            "cer",
+            "carbon evolution"
+        ],
+        "RQ": [
+            "rq",
+            "respiratory"
+        ],
+        "Feed_Rate": [
+            "feed",
+            "pump",
+            "addition",
+            "substrate"
+        ],
+        "Feed_Total": [
+            "feed total",
+            "feed vol",
+            "feed acc"
+        ],
+        "Base_Total": [
+            "base",
+            "naoh",
+            "alkali"
+        ],
+        "Acid_Total": [
+            "acid",
+            "hcl",
+            "h3po4"
+        ],
+        "Antifoam": [
+            "antifoam",
+            "af"
+        ],
+        "Weight": [
+            "weight",
+            "mass",
+            "kg",
+            "scale"
+        ],
+        "Volume": [
+            "volume",
+            "working vol",
+            "l"
+        ],
+        "Conductivity": [
+            "cond",
+            "ms/cm"
+        ],
+        "Capacitance": [
+            "cap",
+            "biomass",
+            "permittivity",
+            "aber",
+            "fogale"
+        ],
+        "Turbidity": [
+            "turb",
+            "od",
+            "optical"
+        ]
+    },
+    "OFFLINE": {
+        "VCD": [
+            "vcd",
+            "viable",
+            "cell density",
+            "living cells",
+            "xv"
+        ],
+        "TCD": [
+            "tcd",
+            "total cells"
+        ],
+        "Viability": [
+            "viab",
+            "%",
+            "alive"
+        ],
+        "Diameter": [
+            "diam",
+            "size",
+            "um"
+        ],
+        "Glucose": [
+            "glc",
+            "gluc",
+            "sugar"
+        ],
+        "Glutamine": [
+            "gln",
+            "glutamine"
+        ],
+        "Glutamate": [
+            "glu",
+            "glutamate"
+        ],
+        "Lactate": [
+            "lac",
+            "lactate"
+        ],
+        "Ammonium": [
+            "amm",
+            "nh4",
+            "nh3"
+        ],
+        "LDH": [
+            "ldh"
+        ],
+        "Offline_pH": [
+            "off ph",
+            "offline ph",
+            "ph_off"
+        ],
+        "Osmolality": [
+            "osmo",
+            "mosm"
+        ],
+        "Titer": [
+            "titer",
+            "product",
+            "igg",
+            "concentration",
+            "mg/l",
+            "g/l"
+        ],
+        "pCO2": [
+            "pco2",
+            "partial pressure"
+        ],
+        "pO2": [
+            "po2",
+            "partial pressure"
+        ]
+    }
+}

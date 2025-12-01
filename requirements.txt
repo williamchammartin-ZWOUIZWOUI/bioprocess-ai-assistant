@@ -1,0 +1,9 @@
+streamlit
+pandas
+openpyxl
+python-docx
+pdfplumber
+python-dotenv
+google-genai
+google-adk
+opentelemetry-instrumentation-google-genai
