@@ -1,187 +1,190 @@
 import streamlit as st
 import os
 import asyncio
-import pandas as pd
+import glob
 from google.genai import types
 
-# Use auto_runner from the backend
-from backend_agent import auto_runner, session_service, APP_NAME, USER_ID
+# 1. SETUP FOLDERS
+FOLDERS = ["input_files", "processed_files", "final_reports"]
+for f in FOLDERS:
+    os.makedirs(f, exist_ok=True)
 
-# --- 1. HELPER TO FIX EVENT LOOP (CRITICAL FOR CLOUD RUN) ---
+# 2. CACHED BACKEND (Updated to fix Session Bugs)
+@st.cache_resource(show_spinner="Loading AI Core...")
+def get_backend():
+    try:
+        # We use importlib to Force-Reload the backend if you change code
+        import importlib
+        import backend_agent
+        importlib.reload(backend_agent)
+        return backend_agent.auto_runner, backend_agent.APP_NAME, backend_agent.USER_ID
+    except ImportError:
+        return None, None, None
+
+# Note: We do NOT import session_service directly anymore to avoid sync issues
+auto_runner, APP_NAME, USER_ID = get_backend()
+
+if not auto_runner:
+    st.error("⚠️ Error: 'backend_agent.py' not found.")
+    st.stop()
+
+# --- HELPER: Async Loop ---
 def get_or_create_eventloop():
     try:
         return asyncio.get_event_loop()
-    except RuntimeError as ex:
-        if "There is no current event loop" in str(ex):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            return loop
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
 
 def run_async_safe(coro):
-    """Safely runs an async function in Streamlit."""
     loop = get_or_create_eventloop()
     return loop.run_until_complete(coro)
 
-# --- 2. PAGE CONFIG & SIDEBAR ---
+# --- UI CONFIG ---
 st.set_page_config(page_title="Bioprocess AI Lab", layout="wide")
 st.title("🧬 Bioprocess AI Assistant")
 
+if "session_id" not in st.session_state:
+    st.session_state["session_id"] = "session_" + os.urandom(4).hex()
+
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("📂 Lab Bench")
-    uploaded_files = st.file_uploader(
-        "Drop files here (PDF, Excel, CSV)", 
-        accept_multiple_files=True
-    )
-    
-    # Immediate Save Logic
+    uploaded_files = st.file_uploader("Upload Data", accept_multiple_files=True)
     saved_paths = []
+    
     if uploaded_files:
-        if not os.path.exists("temp_uploads"):
-            os.makedirs("temp_uploads")
-        
-        st.success(f"Processing {len(uploaded_files)} files...")
+        st.write("---")
         for up_file in uploaded_files:
-            save_path = os.path.join("temp_uploads", up_file.name)
+            # Save to INPUT folder
+            save_path = os.path.join("input_files", up_file.name)
             with open(save_path, "wb") as f:
                 f.write(up_file.getbuffer())
             saved_paths.append(os.path.abspath(save_path))
-            st.caption(f"✅ Loaded: {up_file.name}")
+            st.caption(f"📍 `{up_file.name}`")
+
+    st.divider()
     
-    if st.button("🧹 Clear Chat History"):
-        st.session_state.messages = []
+    # --- ORGANIZED FILE BROWSER ---
+    st.header("💾 Project Files")
+    
+    # 1. Scan Final Reports
+    final_files = glob.glob(os.path.join("final_reports", "*.*"))
+    with st.expander("🏆 Final Reports", expanded=True):
+        if not final_files: st.caption("No reports yet.")
+        for f_path in final_files:
+            with open(f_path, "rb") as f:
+                st.download_button(f"⬇️ {os.path.basename(f_path)}", f, file_name=os.path.basename(f_path), key=f"dl_{f_path}")
+
+    # 2. Scan Processed Files
+    processed_files = glob.glob(os.path.join("processed_files", "*.*"))
+    with st.expander("⚙️ Processed Data", expanded=False):
+        if not processed_files: st.caption("No processed data yet.")
+        for f_path in processed_files:
+            with open(f_path, "rb") as f:
+                st.download_button(f"⬇️ {os.path.basename(f_path)}", f, file_name=os.path.basename(f_path), key=f"dl_{f_path}")
+
+    st.divider()
+    if st.button("🗑️ Clear All"):
+        for folder in FOLDERS:
+            for f in glob.glob(os.path.join(folder, "*")):
+                try: os.remove(f)
+                except: pass
+        st.session_state["messages"] = []
+        st.session_state["session_id"] = "session_" + os.urandom(4).hex()
         st.rerun()
 
-# --- 3. CHAT INTERFACE ---
+# --- CHAT ---
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state["messages"] = []
 
-# Display History
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+for msg in st.session_state["messages"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-# --- 4. RUN AGENT ---
-user_input = st.chat_input("Ex: 'Merge the R06 data with the HPLC results'...")
+# --- AGENT ---
+user_input = st.chat_input("Ex: 'Clean files and merge them for R06'")
 
 if user_input:
-    # A. Display User Message
-    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state["messages"].append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # B. Construct Prompt with Explicit Paths
-    file_context_str = ""
+    full_prompt = user_input
     if saved_paths:
-        file_list_str = "\n".join(saved_paths)
-        file_context_str = f"\n\n[SYSTEM: The user has uploaded files at these local paths: {file_list_str}. If PDF, convert first.]"
+        file_list = "\n".join(saved_paths)
+        full_prompt = f"""
+[SYSTEM_DATA: The user has uploaded files to the 'input_files' folder. Paths below:]
+{file_list}
 
-    # C. Define the Smart Loop (Streaming + Status)
-    async def run_agent_turn(prompt):
+[USER REQUEST]
+{user_input}
+"""
+
+    async def run_agent():
+        sess_id = st.session_state["session_id"]
+        
+        # 1. GET SERVICE FROM RUNNER (Crucial Fix)
+        # We access the service attached to the runner to ensure they are synced
+        svc = auto_runner.session_service
+
+        # 2. ENSURE SESSION EXISTS
         try:
-            session = await session_service.create_session(app_name=APP_NAME, user_id=USER_ID)
+            await svc.get_session(app_name=APP_NAME, user_id=USER_ID, session_id=sess_id)
         except:
-            session = await session_service.get_session(app_name=APP_NAME, user_id=USER_ID, session_id="default")
+            await svc.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=sess_id)
 
-        full_prompt = prompt + file_context_str
-        query_content = types.Content(role="user", parts=[types.Part(text=full_prompt)])
-        
-        full_response_text = ""
-        
-        # UI Elements
-        message_placeholder = st.empty() 
-        status_box = st.status("🤖 Agent is thinking...", expanded=True)
-        
-        async for event in auto_runner.run_async(
-            user_id=USER_ID,
-            session_id=session.id, 
-            new_message=query_content
-        ):
-            if hasattr(event, 'content') and event.content:
-                for part in event.content.parts:
-                    # 1. Text Streaming
-                    if part.text:
-                        full_response_text += part.text
-                        message_placeholder.markdown(full_response_text + "▌")
-                    
-                    # 2. Tool Usage Transparency
-                    if hasattr(part, 'function_call') and part.function_call:
-                        tool_name = part.function_call.name.replace("_", " ").title()
-                        status_box.write(f"🛠️ **Using Tool:** `{tool_name}`")
-                        status_box.update(label=f"Running {tool_name}...", state="running")
+        query = types.Content(role="user", parts=[types.Part(text=full_prompt)])
+        msg_ph = st.empty()
+        status = st.status("🧠 Processing...", expanded=True)
+        full_text = ""
+        tools_ran = False
 
-        # Cleanup
-        status_box.update(label="Complete", state="complete", expanded=False)
-        message_placeholder.markdown(full_response_text) 
-        return full_response_text
+        # 3. ROBUST RETRY LOOP
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                async for event in auto_runner.run_async(new_message=query, session_id=sess_id, user_id=USER_ID):
+                    if event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if part.text:
+                                full_text += part.text
+                                msg_ph.markdown(full_text + "▌")
+                            if part.function_call:
+                                tools_ran = True
+                                fname = part.function_call.name
+                                args = dict(part.function_call.args)
+                                status.write(f"⚙️ **Running:** `{fname}`")
+                                status.json(args)
+                            if part.function_response:
+                                status.write(f"✅ **Done:** `{part.function_response.name}`")
+                
+                # Success! Break loop
+                break 
 
-    # D. Execute Safely
+            except Exception as e:
+                # Catch "Session not found" and fix it immediately
+                if "Session not found" in str(e) and attempt < max_retries - 1:
+                    status.write(f"⚠️ Syncing Memory (Attempt {attempt+1})...")
+                    await svc.create_session(app_name=APP_NAME, user_id=USER_ID, session_id=sess_id)
+                    continue # Retry
+                else:
+                    st.error(f"Error: {e}")
+                    status.update(label="Failed", state="error")
+                    st.stop()
+
+        status.update(label="Complete", state="complete", expanded=False)
+        
+        # Fallback for silent agent
+        if not full_text.strip() and tools_ran:
+            full_text = "✅ **Task Completed.** The agent performed actions. Check the sidebar."
+            
+        msg_ph.markdown(full_text)
+        return full_text
+
     with st.chat_message("assistant"):
-        final_response = run_async_safe(run_agent_turn(user_input))
-
-    # E. Save Message
-    st.session_state.messages.append({"role": "assistant", "content": final_response})
-
-    # F. CHECK FOR DOWNLOADS (Only show buttons if files exist)
+        response_text = run_async_safe(run_agent())
     
-    # 1. Consolidated Data
-    if os.path.exists("Consolidated_Data.xlsx"):
-        with open("Consolidated_Data.xlsx", "rb") as f:
-            st.download_button(
-                label="📥 Download Consolidated Data (XLSX)", 
-                data=f, 
-                file_name="Consolidated_Data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="btn_consolidated"
-            )
-
-    # 2. Formula Sheet
-    if os.path.exists("Formula_Reference.docx"):
-        with open("Formula_Reference.docx", "rb") as f:
-            st.download_button(
-                label="📥 Download Formula Sheet (DOCX)", 
-                data=f, 
-                file_name="Formula_Reference.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key="btn_formula"
-            )
-
-    # 3. Final Report
-    if os.path.exists("Report.docx"):
-        with open("Report.docx", "rb") as f:
-            st.download_button(
-                label="📥 Download Final Report (DOCX)", 
-                data=f, 
-                file_name="Report.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key="btn_report"
-            )
-    
-    # STEP 1 RESULT: The Consolidated Data
-    if os.path.exists("Consolidated_Data.xlsx"):
-        with open("Consolidated_Data.xlsx", "rb") as f:
-            st.download_button(
-                label="📥 Download Consolidated Data (XLSX)", 
-                data=f, 
-                file_name="Consolidated_Data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-    # STEP 2 RESULT: The Formula Sheet
-    if os.path.exists("Formula_Reference.docx"):
-        with open("Formula_Reference.docx", "rb") as f:
-            st.download_button(
-                label="📥 Download Formula Sheet (DOCX)", 
-                data=f, 
-                file_name="Formula_Reference.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-
-    # STEP 5 RESULT: The Final Report
-    if os.path.exists("Report.docx"):
-        with open("Report.docx", "rb") as f:
-            st.download_button(
-                label="📥 Download Final Report (DOCX)", 
-                data=f, 
-                file_name="Report.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+    st.session_state["messages"].append({"role": "assistant", "content": response_text})
+    st.rerun()
