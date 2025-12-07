@@ -1,9 +1,9 @@
 # 🧬 Bioprocess AI Lab Assistant
 
 **Capstone Project: Agents Intensive with Google ADK**
+* **Name:** William Chammartin
 * **Track:** Enterprise Agents
-* **Status:** v2.0 (Gemini 2.5 Integration)
-* **Submission Date:** December 2025
+* **Submission Date:** December 1, 2025
 
 ---
 
@@ -117,5 +117,6 @@ This project is containerized for enterprise deployment.
 * `Dockerfile`: Configuration for containerizing the application (Python 3.11-slim).
 * `requirements.txt`: Project dependencies.
 * `.env`: (Local only) Stores your API keys securely.
+
 
 ---
