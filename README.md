@@ -87,7 +87,6 @@ The `Bioprocess_Manager` follows a logical scientific workflow to ensure data in
     GOOGLE_API_KEY="your_actual_api_key_here"
     GOOGLE_CLOUD_PROJECT="adept-might-479811-q5"
     ```
-    *(Note: The `.gitignore` file prevents this secret key from being uploaded to GitHub.)*
 
 4.  **Run the App:**
     ```bash
@@ -120,3 +119,4 @@ This project is containerized for enterprise deployment.
 
 
 ---
+
