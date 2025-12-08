@@ -1,7 +1,9 @@
-I have uploaded all project files for the chemostat analysis. Please execute the following data processing pipeline immediately without pausing for clarification. Adhere strictly to these schema definitions and rules:
+I have uploaded the project files for the chemostat analysis. Please execute the following data processing pipeline immediately without pausing for clarification. Adhere strictly to these schema definitions and rules:
 
 1. PDF DATA EXTRACTION (Schema Rules)
-- Target Files: All uploaded PDF reports (HPLC and GC).
+- Target Files:
+    - HPLC: "HPLC-RID_Gluc_Acet_TP_Chemostat_2025.pdf", "HPLC-RID_Gluc_Acet_TP_Chemostat_2025_Second_Run.pdf"
+    - GC: "TPChemostat_2025_02Oct25_GC_EtOH.pdf", "TPChemostat_2025_21Oct25_GC_EtOH.pdf"
 - Locating Data: Ignore chromatogram images. Find the results table located below the graphs in each section.
 - Table Detection: Identify the correct table by looking for these exact column headers: "RT [min]", "Area", and "Name".
 - Extraction Logic:
@@ -12,15 +14,18 @@ I have uploaded all project files for the chemostat analysis. Please execute the
 
 2. ONLINE DATA CLEANING & TIME STANDARDIZATION
 - Global Reference Time (t=0): Locate the column named "Timestamp" in the file "R06_2025-09-23_13-29-11_P1.csv". The very first date/time value in this column is t=0.
-- Bioreactor Data ("R06...csv"):
+- Bioreactor Data ("R06_2025-09-23_13-29-11_P1.csv"):
+    - IMPORTANT: This file uses a semicolon (;) as the delimiter. Ensure you parse it correctly.
     - Remove any column where the header string contains the word "Setpoint" (case-insensitive).
     - Remove a column ONLY IF every single value in that column is zero (0) or null. If a column contains even one non-zero number, keep it.
     - Create a column "Time (h)" calculated as: (Current Timestamp - t0) in hours.
-- Offgas Data ("Offgas...xlsx"):
+- Offgas Data ("Offgas_251021_TP Chemostat_R06.xlsx"):
     - Apply the same t=0 reference to calculate "Time (h)" for this file.
 
 3. OFFLINE DATA MERGING (The Bridge)
-- Ammonium Data ("Ammonium.xlsx"): Note that the first column contains the Sample IDs but is missing a header. Treat the first column (Column A) as the "Sample ID" key.
+- Ammonium Data ("Ammonium.xlsx"):
+    - Note: This file contains approximately 17 rows of metadata/header information at the top. Skip these rows until you locate the actual data table.
+    - The first column of the data table represents the Sample ID.
 - Mapping File ("SampleMap.xlsx"):
     - "Steady-State": This column contains the Sample IDs (e.g., 'R06_S1').
     - "Time [h]": This contains the pre-calculated relative time for each sample. Use this value directly; do not recalculate time for offline samples.
