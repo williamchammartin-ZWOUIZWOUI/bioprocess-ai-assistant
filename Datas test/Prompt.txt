@@ -1,1 +1,40 @@
-I have uploaded all project files. Please execute the following data processing pipeline immediately without pausing for clarification. Adhere strictly to these schema definitions and rules:1. PDF DATA EXTRACTION (Schema Rules)Target Files: All uploaded PDF reports (HPLC and GC).Locating Data: Ignore chromatogram images. Find the results table located below the graphs in each section.Table Detection: Identify the correct table by looking for these exact column headers: RT [min], Area, and Name.Extraction Logic:Iterate through the PDFs.Filter 1 (Sample): Extract data only from sections/pages where the header/sample info refers to 'R06'. Ignore all other samples.Filter 2 (Compound): Keep only rows where the Name column matches: 'Glucose', 'Acetate', 'Ethanol', or '1-Propanol'.Data Points: For every matching row, extract the values for Name, RT [min], and Area. (Note: Ignore 'Amount' or 'Concentration' columns if empty; we will calculate these later using Area).2. ONLINE DATA CLEANING (Bioreactor & Offgas)File: R06_2025-09-23_13-29-11_P1.csv and Offgas...xlsx.Column Removal Rules:Zeros: Remove a column ONLY IF every single value in that column is zero (0) or null. If a column contains even one non-zero number, keep it.Setpoints: Remove any column where the header string contains the word 'Setpoint' (case-insensitive).Time Calculation (Online Only):Locate the column named "Timestamp" in the CSV file.Define $t=0$ as the very first date/time value in this "Timestamp" column.Create a new column Time (h) calculated as: $(Current Timestamp - t0)$ in hours.3. OFFLINE DATA MERGING (The Bridge)Mapping File: SampleMap.xlsx.Key Columns in Map:Steady-State: This contains the Sample IDs (e.g., 'R06_S1').Time [h]: This contains the pre-calculated relative time for each sample.Merging Logic:Take the extracted PDF data (from Step 1) and the data from Ammonium.xlsx.Match them to the SampleMap.xlsx using the Sample ID.Constraint: Match the PDF/Ammonium sample name to the Steady-State column in the Map.Fuzzy Matching: If exact matching fails (e.g., 'R06 S1' vs 'R06_S1'), use fuzzy logic to align them.Time Assignment: Do not calculate time for these offline samples. Instead, simply assign the value from the Time [h] column in the Map to the corresponding data row.OUTPUT:Generate a single Excel file named 'Chemostat_Processed_Data.xlsx' containing:Sheet 'Online': The cleaned Bioreactor/Offgas data with the calculated Time (h) column.Sheet 'Offline': The consolidated HPLC, GC, and Ammonium data, aligned with their Time [h] from the map.
+I have uploaded all project files for the chemostat analysis. Please execute the following data processing pipeline immediately without pausing for clarification. Adhere strictly to these schema definitions and rules:
+
+1. PDF DATA EXTRACTION (Schema Rules)
+- Target Files: All uploaded PDF reports (HPLC and GC).
+- Locating Data: Ignore chromatogram images. Find the results table located below the graphs in each section.
+- Table Detection: Identify the correct table by looking for these exact column headers: "RT [min]", "Area", and "Name".
+- Extraction Logic:
+    - Iterate through all PDFs.
+    - Filter 1 (Sample): Extract data ONLY from sections/pages where the header/sample info refers to 'R06'. Ignore all other samples.
+    - Filter 2 (Compound): Keep ONLY rows where the 'Name' column matches: 'Glucose', 'Acetate', 'Ethanol', or '1-Propanol'.
+    - Data Points: For every matching row, extract the values for 'Name', 'RT [min]', and 'Area'. (Note: Ignore 'Amount' or 'Concentration' columns if empty; we will calculate these later using 'Area').
+
+2. ONLINE DATA CLEANING & TIME STANDARDIZATION
+- Global Reference Time (t=0): Locate the column named "Timestamp" in the file "R06_2025-09-23_13-29-11_P1.csv". The very first date/time value in this column is t=0.
+- Bioreactor Data ("R06...csv"):
+    - Remove any column where the header string contains the word "Setpoint" (case-insensitive).
+    - Remove a column ONLY IF every single value in that column is zero (0) or null. If a column contains even one non-zero number, keep it.
+    - Create a column "Time (h)" calculated as: (Current Timestamp - t0) in hours.
+- Offgas Data ("Offgas...xlsx"):
+    - Apply the same t=0 reference to calculate "Time (h)" for this file.
+
+3. OFFLINE DATA MERGING (The Bridge)
+- Ammonium Data ("Ammonium.xlsx"): Note that the first column contains the Sample IDs but is missing a header. Treat the first column (Column A) as the "Sample ID" key.
+- Mapping File ("SampleMap.xlsx"):
+    - "Steady-State": This column contains the Sample IDs (e.g., 'R06_S1').
+    - "Time [h]": This contains the pre-calculated relative time for each sample. Use this value directly; do not recalculate time for offline samples.
+- Merging Logic:
+    1. Consolidate the extracted PDF data (from Step 1) and the "Ammonium.xlsx" data.
+    2. Match them to "SampleMap.xlsx" using the Sample ID.
+    3. Fuzzy Matching: If exact name matching fails (e.g., 'R06 S1' vs 'R06_S1'), use fuzzy logic to align them.
+
+4. FINAL OUTPUT STRUCTURE
+Generate a single Excel file named "Chemostat_Processed_Data.xlsx" containing exactly these three sheets:
+- Sheet 1: "Online Bioreactor"
+    - Contains the cleaned data from "R06_2025-09-23_13-29-11_P1.csv" with the calculated "Time (h)".
+- Sheet 2: "Online Gas"
+    - Contains the data from "Offgas_251021_TP Chemostat_R06.xlsx" with the calculated "Time (h)".
+- Sheet 3: "Offline Analysis"
+    - Contains the merged HPLC, GC, and Ammonium data.
+    - Rows must be aligned by the "Time [h]" found in the Sample Map.
