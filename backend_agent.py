@@ -316,13 +316,79 @@ def add_bioprocess_analysis(file_path: str, graph_column: str = "Dissolved Oxyge
     except Exception as e: return f"Error: {e}"
 
 def create_formula_reference(filename: str, context: str, equations_dict: str, units_dict: str):
+    """
+    Creates a professional, human-readable formula sheet with a Units Table.
+    """
     try:
         if not filename.endswith(".docx"): filename += ".docx"
         output_path = os.path.join(FOLDERS["FINAL"], filename)
-        doc = Document(); doc.add_heading('Formula Reference', 0); doc.add_paragraph(context)
-        doc.add_paragraph(str(equations_dict))
+        doc = Document()
+        
+        # 1. Title & Context
+        doc.add_heading('Formula Reference Sheet', 0)
+        doc.add_heading('Context', level=1)
+        doc.add_paragraph(context)
+        
+        import ast
+        
+        # 2. Units Table (Human Readable)
+        doc.add_heading('Units & Symbols', level=1)
+        try:
+            # Safely parse the string input into a dictionary
+            units = ast.literal_eval(units_dict) if isinstance(units_dict, str) else units_dict
+            
+            if isinstance(units, dict):
+                table = doc.add_table(rows=1, cols=3)
+                table.style = 'Table Grid'
+                
+                # Header Row
+                hdr_cells = table.rows[0].cells
+                hdr_cells[0].text = 'Symbol'
+                hdr_cells[1].text = 'Description'
+                hdr_cells[2].text = 'Unit'
+                
+                # Make header bold
+                for cell in hdr_cells:
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            run.font.bold = True
+                
+                # Data Rows
+                for symbol, desc_unit in units.items():
+                    row_cells = table.add_row().cells
+                    row_cells[0].text = str(symbol)
+                    
+                    # Split "Description (Unit)" if possible
+                    if "(" in desc_unit and desc_unit.endswith(")"):
+                        desc, unit = desc_unit.rsplit("(", 1)
+                        row_cells[1].text = desc.strip()
+                        row_cells[2].text = unit.strip(")")
+                    else:
+                        row_cells[1].text = str(desc_unit)
+                        row_cells[2].text = "-"
+            else:
+                doc.add_paragraph(str(units_dict))
+        except Exception as e:
+            doc.add_paragraph(f"Could not format table: {units_dict}")
+
+        # 3. Formulas (Clean List)
+        doc.add_heading('Formulas', level=1)
+        try:
+            eqs = ast.literal_eval(equations_dict) if isinstance(equations_dict, str) else equations_dict
+            if isinstance(eqs, dict):
+                for name, formula in eqs.items():
+                    p = doc.add_paragraph()
+                    p.style = 'List Bullet'
+                    runner = p.add_run(f"{name}: ")
+                    runner.bold = True
+                    p.add_run(f"\n{formula}")
+            else:
+                doc.add_paragraph(str(equations_dict))
+        except:
+            doc.add_paragraph(str(equations_dict))
+
         doc.save(output_path)
-        return f"SUCCESS: Created {output_path}. (YOU MUST REPORT THIS)"
+        return f"SUCCESS: Created human-readable report at {output_path}."
     except Exception as e: return f"Error: {e}"
 
 def create_word_report(summary: str, filename: str = "Report.docx"):
@@ -417,25 +483,41 @@ web_search_agent = LlmAgent(
     tools=[google_search]
 )
 
-# Research Agent
+# 4. The Research Agent (UPDATED: Human-Readable Formatting)
 research_agent = LlmAgent(
     name="Research_Agent",
     model=Gemini(model="gemini-2.5-flash-lite", api_key=GOOGLE_API_KEY, retry_options=retry_config),
     description="Formula Expert.",
     instruction="""
     You are a Scientific Researcher. 
-    - **Job:** Manage formulas and documentation.
-    - **Formulas:** Use `create_formula_reference` to save formulas to `final_reports/`.
-    - **Note:** Do NOT search the web. Use `Web_Search_Agent` for that.
+    - **Job:** Create clear, human-readable documentation for the user.
+    - **Tool Use:** When using `create_formula_reference`, you MUST provide a `units_dict`.
+    - **Format Rule:** The `units_dict` values MUST follow the format: "Description (Unit)".
+      - *Good:* `{"t": "Time (hours)", "C_glc": "Glucose Conc. (g/L)"}`
+      - *Bad:* `{"t": "Time"}`
+    - **Formulas:** Use standard mathematical notation where possible in `equations_dict`.
     """,
-    tools=[create_formula_reference]
+    tools=[create_formula_reference] 
 )
 
+# 5. Excel Formula Agent (UPDATED: Anti-Silence)
 formula_agent = LlmAgent(
     name="Excel_Formula_Agent",
     model=Gemini(model="gemini-2.5-flash-lite", api_key=GOOGLE_API_KEY, retry_options=retry_config),
     description="Adds Excel formulas.",
-    instruction="Inject formulas into 'Consolidated_Data.xlsx' using `add_calculated_column`.",
+    instruction="""
+    You are an Excel Expert.
+    
+    ### 🛠️ TASK:
+    - Inject formulas into 'Consolidated_Data.xlsx' using `add_calculated_column`.
+    - If you need column names, use `inspect_file_headers` first.
+    
+    ### 🗣️ MANDATORY REPORTING:
+    - **CRITICAL:** You must NEVER return an empty response.
+    - **CRITICAL:** After adding columns, you MUST write a text summary.
+    - **Example:** "I have successfully added the following formula columns: [List Columns]."
+    - If you are silent, the system will crash. **ALWAYS SPEAK.**
+    """,
     tools=[add_calculated_column, inspect_file_headers]
 )
 
@@ -463,6 +545,11 @@ Bioprocess_agent = LlmAgent(
     description="Manager.",
     instruction="""
     You are the Project Manager.
+    
+    ### 🗣️ TRANSPARENCY PROTOCOL (MANDATORY):
+    - **EXPLAIN FIRST:** Before calling *any* tool, you must write a short sentence explaining your plan to the user.
+    - **Format:** "I am now [Action] because [Reason]..."
+    - **Example:** "I am calling the Data Wrangler to clean the raw PDF files so we can use them in Excel."
     
     ### 🚨 FILE ACCESS PROTOCOL (CRITICAL)
     1. **TRUST THE PATHS:** The user has provided local file paths in `[SYSTEM_DATA]`.
@@ -496,19 +583,23 @@ Bioprocess_agent = LlmAgent(
     3. **EXECUTE (After 'Yes'):** Run the pipeline below without stopping until Phase 3.
     
        - **PHASE 1: WRANGLER (Extraction)**
+         - *Explain:* "Starting extraction of raw files..."
          - Call `Data_Wrangler_Agent`. Pass the **EXACT** file paths list.
          - *Wait for confirmation that CSVs are saved.*
          
        - **PHASE 1.5: VERIFICATION (Reality Check)**
+         - *Explain:* "Verifying the generated files..."
          - **ACTION:** Call `list_processed_files` to see exactly what files exist.
          - *Wait for the list of filenames.*
          
        - **PHASE 2: ARCHITECT (Assembly)**
+         - *Explain:* "Assembling the Excel report from verified CSVs..."
          - Call `Excel_Architect_Agent`.
          - **CRITICAL:** Use the filenames found in Phase 1.5.
          - *Command:* "Build `final_reports/Consolidated_Data.xlsx` using [INSERT EXACT FILENAMES FROM LIST]."
          
        - **PHASE 3: RESEARCH (Formulas)**
+         - *Explain:* "Checking required scientific formulas..."
          - Call `Research_Agent`.
          - **STOP:** Ask user to verify formulas.
          
