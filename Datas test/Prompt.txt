@@ -1,6 +1,10 @@
 I have uploaded the project files for the chemostat analysis. Please execute the following data processing pipeline immediately without pausing for clarification. Adhere strictly to these schema definitions and rules:
 
-1. PDF DATA EXTRACTION (Schema Rules)
+1. CONTEXT & FILES OVERVIEW
+- Project Goal: This data is from a chemostat experiment (Batch phase followed by Continuous phase with varying flow rates). The end goal is to calculate Monod kinetics, yields (Yx/s), specific productivity, and Carbon Balance.
+- "DValues.xlsx": This file contains Dilution Rates (D) and calculations. Keep this file available; it will be needed for the analysis phase after cleaning.
+
+2. PDF DATA EXTRACTION (Schema Rules)
 - Target Files:
     - HPLC: "HPLC-RID_Gluc_Acet_TP_Chemostat_2025.pdf", "HPLC-RID_Gluc_Acet_TP_Chemostat_2025_Second_Run.pdf"
     - GC: "TPChemostat_2025_02Oct25_GC_EtOH.pdf", "TPChemostat_2025_21Oct25_GC_EtOH.pdf"
@@ -12,7 +16,7 @@ I have uploaded the project files for the chemostat analysis. Please execute the
     - Filter 2 (Compound): Keep ONLY rows where the 'Name' column matches: 'Glucose', 'Acetate', 'Ethanol', or '1-Propanol'.
     - Data Points: For every matching row, extract the values for 'Name', 'RT [min]', and 'Area'. (Note: Ignore 'Amount' or 'Concentration' columns if empty; we will calculate these later using 'Area').
 
-2. ONLINE DATA CLEANING & TIME STANDARDIZATION
+3. ONLINE DATA CLEANING & TIME STANDARDIZATION
 - Global Reference Time (t=0): Locate the column named "Timestamp" in the file "R06_2025-09-23_13-29-11_P1.csv". The very first date/time value in this column is t=0.
 - Bioreactor Data ("R06_2025-09-23_13-29-11_P1.csv"):
     - IMPORTANT: This file uses a semicolon (;) as the delimiter. Ensure you parse it correctly.
@@ -22,7 +26,7 @@ I have uploaded the project files for the chemostat analysis. Please execute the
 - Offgas Data ("Offgas_251021_TP Chemostat_R06.xlsx"):
     - Apply the same t=0 reference to calculate "Time (h)" for this file.
 
-3. OFFLINE DATA MERGING (The Bridge)
+4. OFFLINE DATA MERGING (The Bridge)
 - Ammonium Data ("Ammonium.xlsx"):
     - Note: This file contains approximately 17 rows of metadata/header information at the top. Skip these rows until you locate the actual data table.
     - The first column of the data table represents the Sample ID.
@@ -32,9 +36,9 @@ I have uploaded the project files for the chemostat analysis. Please execute the
 - Merging Logic:
     1. Consolidate the extracted PDF data (from Step 1) and the "Ammonium.xlsx" data.
     2. Match them to "SampleMap.xlsx" using the Sample ID.
-    3. Fuzzy Matching: If exact name matching fails (e.g., 'R06 S1' vs 'R06_S1'), use fuzzy logic to align them.
+    3. Critical: Sample IDs in the source files may differ slightly in format from the Map (e.g., 'R06 S1' vs 'R06_S1'). Use fuzzy matching to align them logically.
 
-4. FINAL OUTPUT STRUCTURE
+5. FINAL OUTPUT STRUCTURE
 Generate a single Excel file named "Chemostat_Processed_Data.xlsx" containing exactly these three sheets:
 - Sheet 1: "Online Bioreactor"
     - Contains the cleaned data from "R06_2025-09-23_13-29-11_P1.csv" with the calculated "Time (h)".
