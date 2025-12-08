@@ -7,7 +7,8 @@ import logging
 import datetime
 import pdfplumber
 import asyncio
-import openpyxl 
+import time
+import openpyxl
 import shutil
 from docx import Document
 from openpyxl import load_workbook, Workbook
@@ -47,29 +48,15 @@ for f in FOLDERS.values():
 logging.basicConfig(level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
+# FIX: Aggressive Retry Logic for Error 429 (Rate Limits)
 retry_config = types.HttpRetryOptions(
-    attempts=10, 
-    exp_base=2, 
-    initial_delay=15,  # Wait 15s before first retry
+    attempts=15,        # Increased to survive 60s bans
+    exp_base=2,         # Exponential backoff
+    initial_delay=20,   # Start with 20s wait
     http_status_codes=[429, 500, 503]
 )
-# --- 3. HELPER FUNCTIONS ---
-# (Keep other helpers...)
 
-async def auto_save_to_memory(callback_context):
-    """Safely saves session to memory."""
-    try:
-        # Robust check to prevent NoneType errors
-        if not callback_context or not hasattr(callback_context, '_invocation_context'):
-            return
-            
-        ctx = callback_context._invocation_context
-        if ctx and hasattr(ctx, 'memory_service') and hasattr(ctx, 'session'):
-            if ctx.memory_service and ctx.session:
-                await ctx.memory_service.add_session_to_memory(ctx.session)
-    except Exception as e:
-        # Log warning but DO NOT crash the app
-        print(f"[WARN] Memory save skipped: {e}")
+# --- 3. HELPER FUNCTIONS ---
 
 def resolve_path(file_path):
     """Smart path finder that looks in specific folders."""
@@ -96,24 +83,42 @@ def smart_read_file(f_path):
     except: return pd.DataFrame()
 
 def profile_file_content(file_path: str):
-    """Returns summary stats of a file. Used by Analyst Agent."""
     try:
         df = smart_read_file(file_path)
         if df.empty: return "Empty file."
         return f"File: {file_path}\nColumns: {list(df.columns)}\nStats:\n{df.describe(include='all').to_string()}"
     except Exception as e: return f"Error: {e}"
 
-# --- 4. THE TOOLKIT ---
-
-def inspect_file_headers(file_path: str):
+async def auto_save_to_memory(callback_context):
+    """Automatically saves session to memory."""
     try:
-        df = smart_read_file(file_path)
-        if df.empty: return "Error: Empty."
-        return f"FILE: {file_path}\nSHAPE: {df.shape}\nCOLUMNS: {list(df.columns)}\nSAMPLE:\n{df.head(3).to_string()}"
-    except Exception as e: return f"Error: {e}"
+        if hasattr(callback_context, '_invocation_context'):
+            ctx = callback_context._invocation_context
+            if hasattr(ctx, 'memory_service') and hasattr(ctx, 'session'):
+                await ctx.memory_service.add_session_to_memory(ctx.session)
+    except: pass
 
 # --- 4. THE TOOLKIT ---
 
+def list_processed_files(directory: str = "processed_files"):
+    """
+    Lists all files currently waiting in the 'processed_files' folder.
+    Use this to find the EXACT filenames before trying to merge or build reports.
+    """
+    try:
+        # Use global FOLDERS dict if available, else default
+        target_dir = FOLDERS.get("PROCESSED", "processed_files")
+        if not os.path.exists(target_dir):
+            return "Error: Directory not found."
+            
+        files = os.listdir(target_dir)
+        if not files:
+            return "Folder is empty."
+            
+        return f"📂 FILES IN '{target_dir}':\n" + "\n".join(files)
+    except Exception as e:
+        return f"Error listing files: {e}"
+        
 def inspect_file_headers(file_path: str):
     try:
         df = smart_read_file(file_path)
@@ -123,79 +128,137 @@ def inspect_file_headers(file_path: str):
 
 def execute_pandas_operation(file_path: str, operation_description: str, python_code: str):
     """
-    Executes dynamic Python code.
-    FIX: Uses a single scope to fix 'NameError' and enforces reporting.
+    Executes dynamic Python code. 
+    FIX: Injects 'glob' and 'os' for file finding. Enforces print suppression.
     """
+    import io
+    import sys
+    
     try:
         real_path = resolve_path(file_path)
-        if not real_path: return f"Error: File not found."
+        # Allow running without a specific file if checking a folder
+        if not real_path and "processed_files" not in python_code: 
+             return f"Error: File {file_path} not found."
+        
         print(f"[SYSTEM] 🐍 Executing Python: {operation_description}")
         
-        # Load data reliably
-        df = smart_read_file(real_path)
+        # Load primary file if it exists
+        df = smart_read_file(real_path) if real_path else pd.DataFrame()
         
-        # Inject libraries into scope
         import difflib
         import numpy as np
+        import glob  
+        import os    
         
+        # 1. SETUP CAPTURE
+        captured_output = io.StringIO()
+        original_stdout = sys.stdout
+        sys.stdout = captured_output 
+        
+        # 2. DEFINE SCOPE
         execution_scope = {
             'df': df,
             'pd': pd,
             'np': np,
+            'glob': glob,       
+            'os': os,           
             'difflib': difflib,
             'datetime': datetime,
-            'file_path': real_path
+            'file_path': real_path,
+            'smart_read_file': smart_read_file, 
+            'resolve_path': resolve_path
         }
         
-        # Execute
-        exec(python_code, execution_scope)
+        try:
+            # 3. RUN CODE
+            exec(python_code, execution_scope)
+        except Exception as e:
+            sys.stdout = original_stdout
+            return f"PYTHON ERROR: {e}"
+        finally:
+            # 4. RESTORE CONSOLE
+            sys.stdout = original_stdout
+            
+        # 5. SAFETY CHECK
+        output_str = captured_output.getvalue()
+        if len(output_str) > 500: 
+            print(f"[SYSTEM] ⚠️ Output truncated: {output_str[:200]}... [omitted]")
+        else:
+            print(f"[SYSTEM] 🐍 Output: {output_str}")
         
-        # Retrieve result
+        # 6. SAVE RESULT
         if 'df' in execution_scope:
             df_new = execution_scope['df']
         else:
-            return "Error: The code did not update the 'df' variable."
+            # If the code saved files directly (common in merges), that's fine too.
+            if "to_csv" in python_code or "to_excel" in python_code:
+                return f"SUCCESS: Operation completed. Output checked: {output_str}"
+            return "Error: Code did not update 'df' or save a file."
         
-        # Save
-        base_name = os.path.basename(real_path)
-        if base_name.endswith(".xlsx"): base_name = base_name.replace(".xlsx", ".csv")
-        output_path = os.path.join(FOLDERS["PROCESSED"], base_name)
+        # Auto-save logic
+        if real_path:
+            base_name = os.path.basename(real_path)
+            name_part, ext = os.path.splitext(base_name)
+            new_name = f"{name_part}_Processed.csv" if "_Processed" not in name_part else base_name
+            output_path = os.path.join(FOLDERS["PROCESSED"], new_name)
+            df_new.to_csv(output_path, index=False)
+            return f"SUCCESS: Processed {base_name}. Saved to {output_path}. (YOU MUST REPORT THIS)"
+        else:
+            return f"SUCCESS: General script executed. Output: {output_str}"
         
-        df_new.to_csv(output_path, index=False)
-        
-        # CRITICAL FIX: The text in parentheses forces the LLM to speak
-        return f"SUCCESS: Processed {base_name}. Saved to {output_path}. (YOU MUST REPORT THIS TO THE USER)"
-    except Exception as e: return f"PYTHON ERROR: {e}"
+    except Exception as e: 
+        return f"PYTHON ERROR: {e}"
 
 def convert_pdf_to_excel(pdf_path: str, instruction: str = "Extract data"):
-    """Converts PDF to CSV. Saves to PROCESSED folder."""
+    """
+    Converts PDF to CSV. 
+    FIX: Includes a 'Sleep & Retry' loop to survive Rate Limits (429 Errors).
+    """
     try:
         real_path = resolve_path(pdf_path)
-        if not real_path: return f"Error: Not found."
-        if os.path.getsize(real_path) > 10 * 1024 * 1024: return "Error: Too large."
+        if not real_path: return f"Error: File {pdf_path} not found."
         
         from google import genai
         client = genai.Client(api_key=GOOGLE_API_KEY)
-        with open(real_path, "rb") as f: pdf_bytes = f.read()
-            
-        prompt = f"Task: {instruction}. Output raw CSV. No markdown."
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=[types.Content(role="user", parts=[types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"), types.Part.from_text(text=prompt)])]
-        )
-        csv_text = response.text.replace("```csv", "").replace("```", "")
         
+        with open(real_path, "rb") as f: pdf_bytes = f.read()
+        
+        prompt = f"Task: {instruction}. Output raw CSV. No markdown."
+        
+        max_retries = 5
+        wait_seconds = 30 
+        
+        csv_text = None
+        for attempt in range(max_retries):
+            try:
+                # Using the LITE model as requested
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash-lite",
+                    contents=[types.Content(role="user", parts=[types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"), types.Part.from_text(text=prompt)])]
+                )
+                csv_text = response.text.replace("```csv", "").replace("```", "")
+                break
+            except Exception as e:
+                # If we hit the rate limit, WAIT instead of crashing
+                if "429" in str(e) and attempt < max_retries - 1:
+                    print(f"[SYSTEM] ⏳ Rate Limit hit in PDF Tool. Waiting {wait_seconds}s...")
+                    time.sleep(wait_seconds)
+                    wait_seconds += 10 # Increase wait
+                    continue
+                else:
+                    return f"Error converting PDF: {e}"
+        
+        if not csv_text: return "Error: Failed to get response."
+
         base_name = os.path.basename(real_path).replace(".pdf", "_Converted.csv")
         output_path = os.path.join(FOLDERS["PROCESSED"], base_name)
         
         with open(output_path, "w", encoding="utf-8") as f: f.write(csv_text.strip())
-        
-        # CRITICAL FIX: Forces reporting
         return f"SUCCESS: Converted {base_name}. Saved to {output_path}. (YOU MUST REPORT THIS TO THE USER)"
     except Exception as e: return f"Error: {e}"
 
 def append_offline_sheet(source_file: str, output_filename: str, sheet_name: str = None):
-    """Appends data as a sheet. Saves to FINAL folder."""
+    """Appends data as a sheet. FIX: Handles write/append logic."""
     try:
         real_source = resolve_path(source_file)
         if not real_source: return f"Error: Source {source_file} not found."
@@ -212,47 +275,17 @@ def append_offline_sheet(source_file: str, output_filename: str, sheet_name: str
             with pd.ExcelWriter(output_path, engine='openpyxl', mode='w') as writer:
                 df.to_excel(writer, sheet_name=sheet_name or "Data", index=False)
                 
-        return f"Appended {sheet_name} to {output_path}"
-    except Exception as e: return f"Error appending: {e}"
-
-# (Keep add_calculated_column and others as they were)
-
-def append_offline_sheet(source_file: str, output_filename: str, sheet_name: str = None):
-    """Appends data as a sheet. Saves to FINAL folder."""
-    try:
-        real_source = resolve_path(source_file)
-        if not real_source: return f"Error: Source {source_file} not found."
-        
-        output_filename = os.path.basename(output_filename)
-        output_path = os.path.join(FOLDERS["FINAL"], output_filename)
-            
-        df = smart_read_file(real_source)
-        
-        # Check if file exists to determine mode
-        if os.path.exists(output_path):
-            # Append Mode: Safe to use if_sheet_exists
-            with pd.ExcelWriter(output_path, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-                df.to_excel(writer, sheet_name=sheet_name or "Data", index=False)
-        else:
-            # Write Mode: Create new file (CANNOT use if_sheet_exists)
-            with pd.ExcelWriter(output_path, engine='openpyxl', mode='w') as writer:
-                df.to_excel(writer, sheet_name=sheet_name or "Data", index=False)
-                
-        return f"Appended {sheet_name} to {output_path}"
+        return f"SUCCESS: Appended {sheet_name} to {output_filename}. (YOU MUST REPORT THIS)"
     except Exception as e: return f"Error appending: {e}"
 
 def add_calculated_column(file_path: str, new_col_name: str, formula_template: str):
-    """Adds Excel formula column."""
     try:
         clean_path = resolve_path(file_path)
         if not clean_path: return "Error: File not found."
-        
-        wb = load_workbook(clean_path)
-        ws = wb.active 
+        wb = load_workbook(clean_path); ws = wb.active 
         col_map = {str(cell.value).strip(): get_column_letter(idx) for idx, cell in enumerate(ws[1], 1) if cell.value}
         new_col_idx = ws.max_column + 1
         ws.cell(row=1, column=new_col_idx, value=new_col_name)
-        
         import re
         ingredients = re.findall(r'\{(.*?)\}', formula_template)
         for row in range(2, ws.max_row + 1):
@@ -263,81 +296,88 @@ def add_calculated_column(file_path: str, new_col_name: str, formula_template: s
                 else: valid = False
             if valid: ws.cell(row=row, column=new_col_idx, value=row_formula)
         wb.save(clean_path)
-        return f"SUCCESS: Added {new_col_name}"
+        return f"SUCCESS: Added {new_col_name}. (YOU MUST REPORT THIS)"
     except Exception as e: return f"Error: {e}"
 
 def add_bioprocess_analysis(file_path: str, graph_column: str = "Dissolved Oxygen"):
-    """Adds graphs."""
     try:
         clean_path = resolve_path(file_path)
-        wb = load_workbook(clean_path)
-        ws = wb.active
+        wb = load_workbook(clean_path); ws = wb.active
         headers = [cell.value for cell in ws[1]]
         time_idx = next(i for i, h in enumerate(headers) if h and "Time" in str(h)) + 1
         data_idx = next(i for i, h in enumerate(headers) if h and graph_column in str(h)) + 1
-        
         chart = LineChart()
-        chart.title = graph_column
-        chart.x_axis.title = "Time"
+        chart.title = graph_column; chart.x_axis.title = "Time"
         data = Reference(ws, min_col=data_idx, min_row=1, max_row=ws.max_row)
         cats = Reference(ws, min_col=time_idx, min_row=2, max_row=ws.max_row)
         chart.add_data(data, titles_from_data=True); chart.set_categories(cats)
         ws.add_chart(chart, "E5"); wb.save(clean_path)
-        return "SUCCESS: Graph added."
+        return "SUCCESS: Graph added. (YOU MUST REPORT THIS)"
     except Exception as e: return f"Error: {e}"
 
 def create_formula_reference(filename: str, context: str, equations_dict: str, units_dict: str):
-    """Creates Formula Doc. Saves to FINAL folder."""
     try:
         if not filename.endswith(".docx"): filename += ".docx"
         output_path = os.path.join(FOLDERS["FINAL"], filename)
         doc = Document(); doc.add_heading('Formula Reference', 0); doc.add_paragraph(context)
         doc.add_paragraph(str(equations_dict))
         doc.save(output_path)
-        return f"Created {output_path}"
+        return f"SUCCESS: Created {output_path}. (YOU MUST REPORT THIS)"
     except Exception as e: return f"Error: {e}"
 
 def create_word_report(summary: str, filename: str = "Report.docx"):
-    """Creates Report. Saves to FINAL folder."""
     try:
         output_path = os.path.join(FOLDERS["FINAL"], filename)
         doc = Document(); doc.add_heading('Final Report', 0); doc.add_paragraph(summary)
         doc.save(output_path)
-        return f"Report saved to {output_path}"
+        return f"SUCCESS: Report saved to {output_path}. (YOU MUST REPORT THIS)"
     except Exception as e: return f"Error: {e}"
 
 # --- 5. AGENT DEFINITIONS ---
 
+# 1. The Data Wrangler
 data_wrangler_agent = LlmAgent(
     name="Data_Wrangler_Agent",
     model=Gemini(model="gemini-2.5-flash-lite", api_key=GOOGLE_API_KEY, retry_options=retry_config),
     description="Cleans data.",
     instruction="""
-    You are a Senior Data Scientist / Python Expert.
+    You are a Senior Data Scientist.
     
-    ### ⚡️ CRITICAL EXECUTION RULES:
-    1. **SEQUENTIAL PROCESSING (Avoid 429 Errors):** - Do **NOT** process all 9 files at once. 
-       - Process only **1 or 2 files per turn**.
-       - After processing 2 files, STOP and report. Wait for the next command.
-       
-    2. **ROBUST DATE PARSING:** - When parsing timestamps (especially in 'R06...csv'), **ALWAYS** use:
-         `pd.to_datetime(df['Timestamp'], dayfirst=True, errors='coerce')`
-       - This prevents the "Unknown datetime string format" error.
-
-    3. **DATA LOADING:** The variable `df` contains the file data. Use it directly.
+    ### 🛑 SYNTAX & PATH SAFETY (CRITICAL):
+    1. **NO BACKSLASHES:** Windows paths (e.g., `C:\\Users...`) cause syntax errors. 
+       - **ALWAYS** use relative paths: `processed_files/MyFile.csv`.
+    2. **USE GLOB:** To merge multiple files, use:
+       `files = glob.glob('processed_files/*_Converted.csv')`
+       Then loop through `files` to read and concat. Do NOT hardcode file paths.
+    3. **STATELESS:** Variables (`df1`, `df2`) DO NOT persist between tool calls. You must re-read files to merge them.
     
-    ### 🗣️ MANDATORY OUTPUT RULE (CRITICAL):
-    - **NEVER** finish silently (None). 
-    - You **MUST** return a text summary: "Processed [File X] and [File Y]. Saved to processed_files/."
+    ### 🛑 INPUT STRICTNESS:
+    1. **NO GUESSING:** Do NOT invent filenames. Use the exact paths provided or find them with `glob`.
+    2. **FILTERING:** If the user mentions "R06", it refers to DATA INSIDE the file, not the filename.
     
-    ### 🧠 CAPABILITIES:
-    - **Fuzzy Matching:** Use `difflib.get_close_matches`.
-    - **Filtering:** `df = df[df['Column'].str.contains('R06')]`.
+    ### 🔧 AUTO-CORRECTION STRATEGY:
+    If you encounter "Column mismatch" or "Length mismatch" errors during merging:
+    1. **DO NOT GIVE UP.**
+    2. **INSPECT:** Use `df.columns` to see the *actual* column names.
+    3. **STANDARDIZE:** Rename columns to a common standard before merging.
+       - *Example:* Rename 'Sample', 'Sample Name', 'Name' -> 'Sample_ID'.
+    4. **RETRY:** Attempt the merge again with the corrected columns.
+    
+    ### ⚡️ EXECUTION RULES:
+    1. **PROCESS ALL FILES:** Process every file in the list.
+    2. **MERGING:** Use the injected `smart_read_file(f)` inside your loop.
+    3. **NO PRINTING:** Do NOT print entire dataframes. Only print `.head()`.
+    4. **RENAMING:** Output files MUST use a different name (e.g. `_Processed.csv`).
+    
+    ### 🗣️ MANDATORY REPORTING (ANTI-CRASH RULE):
+    - **YOU MUST SPEAK:** After running tools, you MUST return a text summary.
+    - **FORBIDDEN:** Do NOT return empty content.
+    - **TEMPLATE:** "I have successfully processed: [LIST FILES]. They are saved in `processed_files/`."
     """,
     tools=[inspect_file_headers, execute_pandas_operation, convert_pdf_to_excel]
 )
 
-# 2. The Excel Architect (Robust)
+# 2. The Excel Architect
 excel_architect_agent = LlmAgent(
     name="Excel_Architect_Agent",
     model=Gemini(model="gemini-2.5-flash-lite", api_key=GOOGLE_API_KEY, retry_options=retry_config),
@@ -345,40 +385,57 @@ excel_architect_agent = LlmAgent(
     instruction="""
     You are the Master Builder.
     
-    ### 🛠️ TASK:
-    1. Look for ALL CSV files in `processed_files/`.
-    2. Use `append_offline_sheet` to add EACH file as a tab to 'Consolidated_Data.xlsx' in `final_reports/`.
-    3. **Important:** Create the 'Online_Data' sheet first if it exists.
+    ### 👁️ REALITY CHECK (CRITICAL):
+    1. **FIRST ACTION:** You MUST call `list_processed_files` immediately to see what files actually exist in `processed_files/`.
+    2. **NEVER GUESS:** Do not assume filenames like "Online_Data.csv" or "table_1.csv". 
+    3. **USE FACTUAL NAMES:** Only use the exact filenames returned by the list tool.
     
-    ### 🏁 REPORT:
-    - Return a text summary of the sheets created.
+    ### 🛠️ CAPABILITIES:
+    - Your tool `append_offline_sheet` SUPPORTS both .csv and .xlsx input files.
+    - **NEVER** complain about file formats. Just try to append them.
+    
+    ### 🛠️ TASK:
+    1. List the files.
+    2. Use `append_offline_sheet` to build 'Consolidated_Data.xlsx' in `final_reports/` using the actual files you found.
+    
+    ### 🏁 REPORTING:
+    - Return a text summary of exactly which sheets were added.
     """,
-    tools=[append_offline_sheet]
+    tools=[append_offline_sheet, list_processed_files] # <--- Added the new tool here
 )
 
-# 3. The Researcher (Flexible: Formulas + Questions)
+# Search Agent
+web_search_agent = LlmAgent(
+    name="Web_Search_Agent",
+    model=Gemini(model="gemini-2.5-flash-lite", api_key=GOOGLE_API_KEY, retry_options=retry_config),
+    description="Searches Google.",
+    instruction="""
+    You are a Web Researcher.
+    - Your ONLY job is to search Google for information.
+    - Summarize the search results clearly for the user.
+    """,
+    tools=[google_search]
+)
+
+# Research Agent
 research_agent = LlmAgent(
     name="Research_Agent",
     model=Gemini(model="gemini-2.5-flash-lite", api_key=GOOGLE_API_KEY, retry_options=retry_config),
-    description="Performs web searches and compiles formulas.",
+    description="Formula Expert.",
     instruction="""
     You are a Scientific Researcher. 
-    
-    ### 🧠 CAPABILITIES:
-    1. **General Research:** If the user asks a question (e.g. "What is a chemostat?"), use `Google Search`.
-    2. **Formula Collection:** If the user wants formulas, gather them and use `create_formula_reference` to save to `final_reports/`.
-    
-    ### ⚡️ RULES:
-    - ALWAYS cite your sources (URLs).
+    - **Job:** Manage formulas and documentation.
+    - **Formulas:** Use `create_formula_reference` to save formulas to `final_reports/`.
+    - **Note:** Do NOT search the web. Use `Web_Search_Agent` for that.
     """,
-    tools=[google_search, create_formula_reference]
+    tools=[create_formula_reference]
 )
 
 formula_agent = LlmAgent(
     name="Excel_Formula_Agent",
     model=Gemini(model="gemini-2.5-flash-lite", api_key=GOOGLE_API_KEY, retry_options=retry_config),
     description="Adds Excel formulas.",
-    instruction="Inject formulas into 'Consolidated_Data.xlsx' using `add_calculated_column`. Check headers first.",
+    instruction="Inject formulas into 'Consolidated_Data.xlsx' using `add_calculated_column`.",
     tools=[add_calculated_column, inspect_file_headers]
 )
 
@@ -386,7 +443,7 @@ excel_analyst_agent = LlmAgent(
     name="Excel_Analyst_Agent",
     model=Gemini(model="gemini-2.5-flash-lite", api_key=GOOGLE_API_KEY, retry_options=retry_config),
     description="Creates graphs.",
-    instruction="Ask user what to graph, then use `add_bioprocess_analysis` on the Consolidated Data.",
+    instruction="Ask user what to graph, then use `add_bioprocess_analysis`.",
     tools=[add_bioprocess_analysis, profile_file_content]
 )
 
@@ -407,52 +464,78 @@ Bioprocess_agent = LlmAgent(
     instruction="""
     You are the Project Manager.
     
-    ### 🗣️ COMMUNICATION:
-    - **ANNOUNCE:** "Starting Phase 1...", "Phase 1 Complete. Starting Phase 2..."
-    - **NEVER be silent.**
+    ### 🚨 FILE ACCESS PROTOCOL (CRITICAL)
+    1. **TRUST THE PATHS:** The user has provided local file paths in `[SYSTEM_DATA]`.
+    2. **YOU HAVE PERMISSION:** Do not verify access. Just pass the strings to the tools.
+    3. **DELEGATE:** Your job is to pass these exact paths to `Data_Wrangler_Agent`.
     
-    ### 🧠 LOGIC (STRICT MODULAR PIPELINE):
-    **SCENARIO A: Raw Files (Do not skip steps)**
+    ### 🛠️ TOOL CONTRACT (INPUTS & OUTPUTS)
     
-    1.  **PHASE 1: EXTRACTION (Wrangler)**
-        - Call `Data_Wrangler_Agent` to convert PDFs to CSVs.
-        - *Wait for confirmation.*
-        
-    2.  **PHASE 2: CLEANING (Wrangler)**
-        - Call `Data_Wrangler_Agent` to clean the CSVs (remove zeros, setpoints).
-        - *Wait for confirmation.*
-        
-    3.  **PHASE 3: MERGING (Wrangler)**
-        - Call `Data_Wrangler_Agent` to merge files using 'SampleMap.xlsx'.
-        - *Wait for confirmation.*
+    **1. Data_Wrangler_Agent**
+    - **INPUT:** Raw file paths from `[SYSTEM_DATA]`.
+    - **OUTPUT:** Cleaned **CSV files** in `processed_files/`.
+    - **LIMITATION:** This agent CANNOT create the final Excel file. It only makes intermediate CSVs.
     
-    4.  **PHASE 4: ASSEMBLY (Architect)**
-        - Call `Excel_Architect_Agent` to build `final_reports/Consolidated_Data.xlsx`.
-        - *Note:* This file is ONLY created in this step.
+    **2. Excel_Architect_Agent**
+    - **INPUT:** Explicit list of filenames in `processed_files/`.
+    - **OUTPUT:** A single **.xlsx file** in `final_reports/`.
+    - **MANDATE:** You MUST pass the EXACT filenames created by the Wrangler to this agent.
     
-    5.  **PHASE 5: ANALYSIS (Analyst/Researcher)**
-        - Call `Research_Agent` for formulas -> `Excel_Formula_Agent` -> `Excel_Analyst_Agent`.
+    **3. Web_Search_Agent**
+    - **INPUT:** A specific question.
+    - **OUTPUT:** Search results from Google.
+    - **USE CASE:** Only for general questions (e.g., "What is glucose?").
     
-    6.  **PHASE 6: REPORTING (Reporter)**
-        - Call `Word_Report_Agent`.
+    ### 🧠 CORE BEHAVIOR: DECIDE -> PLAN -> EXECUTE
     
-    **SCENARIO B: Clean Excel**
-    - Start at Phase 5.
+    **SCENARIO A: RAW FILES (PDFs/CSVs)**
+    *Trigger:* User uploads raw data files.
     
-    **SCENARIO C: General Questions**
-    - Call `Research_Agent`.
+    1. **PROPOSE PLAN:** Read `[SYSTEM_DATA]`. Output a numbered plan (Extraction -> Assembly -> Formulas).
+    2. **ASK:** "Does this plan look correct? Say 'Yes' to execute."
+    3. **EXECUTE (After 'Yes'):** Run the pipeline below without stopping until Phase 3.
     
-    ### 🏁 STATUS UPDATE RULE:
-    At the very end of EVERY response, ALWAYS add a status block:
+       - **PHASE 1: WRANGLER (Extraction)**
+         - Call `Data_Wrangler_Agent`. Pass the **EXACT** file paths list.
+         - *Wait for confirmation that CSVs are saved.*
+         
+       - **PHASE 1.5: VERIFICATION (Reality Check)**
+         - **ACTION:** Call `list_processed_files` to see exactly what files exist.
+         - *Wait for the list of filenames.*
+         
+       - **PHASE 2: ARCHITECT (Assembly)**
+         - Call `Excel_Architect_Agent`.
+         - **CRITICAL:** Use the filenames found in Phase 1.5.
+         - *Command:* "Build `final_reports/Consolidated_Data.xlsx` using [INSERT EXACT FILENAMES FROM LIST]."
+         
+       - **PHASE 3: RESEARCH (Formulas)**
+         - Call `Research_Agent`.
+         - **STOP:** Ask user to verify formulas.
+         
+       - **PHASE 4: COMPLETION**
+         - Call `Excel_Formula_Agent` -> `Excel_Analyst_Agent` -> `Word_Report_Agent`.
+    
+    **SCENARIO B: CLEAN EXCEL**
+    *Trigger:* User uploads a file named 'Chemostat_Processed_Data.xlsx'.
+    1. **ACTION:** Skip directly to **Phase 3** (Research/Formulas).
+    
+    **SCENARIO C: GENERAL QUESTIONS**
+    *Trigger:* User asks a question (e.g., "What is a chemostat?") without files.
+    1. **ACTION:** Call `Web_Search_Agent` immediately.
+    
+    ### 🏁 STATUS UPDATE:
     **Project Status:**
-    * 📊 Data: [Pending / Phase 1 / Phase 2 / Phase 3 / ✅ Done]
-    * 📝 Report: [Pending / ✅ Done]
+    * 📊 Consolidated Data: [Pending/Done]
+    * 📝 Formula Sheet: [Pending/Done]
+    * 📑 Final Report: [Pending/Done]
     """,
     tools=[
         preload_memory, 
+        list_processed_files,
         AgentTool(agent=data_wrangler_agent), 
         AgentTool(agent=excel_architect_agent), 
         AgentTool(agent=research_agent), 
+        AgentTool(agent=web_search_agent),
         AgentTool(agent=formula_agent), 
         AgentTool(agent=excel_analyst_agent), 
         AgentTool(agent=word_report_agent)
